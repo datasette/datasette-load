@@ -281,3 +281,18 @@ async def test_load_endpoint_html():
     )
     assert response.status_code == 200
     assert ">Load data from a URL<" in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_id", (None, "other", "user"))
+async def test_homepage_menu(user_id):
+    datasette = create_datasette()
+    cookies = {}
+    if user_id:
+        cookies["ds_actor"] = datasette.client.actor_cookie({"id": user_id})
+    response = await datasette.client.get("/", cookies=cookies)
+    fragment = ">Load data into Datasette from a URL"
+    if user_id == "user":
+        assert fragment in response.text
+    else:
+        assert fragment not in response.text

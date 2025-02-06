@@ -36,6 +36,21 @@ def register_permissions():
     ]
 
 
+@hookimpl
+def homepage_actions(datasette, actor):
+    async def inner():
+        if actor and await datasette.permission_allowed(actor, "datasette-load"):
+            return [
+                {
+                    "href": datasette.urls.path("/-/load"),
+                    "label": "Load data into Datasette from a URL",
+                    "description": "Import a full SQLite database into Datasette",
+                }
+            ]
+
+    return inner
+
+
 async def load_view(request, datasette):
     """
     Handle POST /-/load
