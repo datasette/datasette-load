@@ -72,8 +72,8 @@ async def test_load_api_success(httpx_mock, tmp_path):
     assert status_data["done"] is True
     assert status_data["error"] is None
     assert status_data["name"] == "new_db"
-    assert "done_count" in status_data
-    assert "todo" in status_data
+    assert "done_bytes" in status_data
+    assert "todo_bytes" in status_data
     # Check that the database was correctly added, and that the tables and data are accurate
     db = datasette.get_database("new_db")
     assert "new_db" in datasette.databases
@@ -237,8 +237,8 @@ async def test_database_removed_if_exists(httpx_mock):
 
 
 @pytest.mark.asyncio
-async def test_method_not_allowed_for_load_endpoint():
+async def test_load_endpoint_html():
     datasette = Datasette(memory=True)
     response = await datasette.client.get("/-/load")
-    assert response.status_code == 405
-    assert response.text == "Method not allowed"
+    assert response.status_code == 200
+    assert ">Load data from a URL<" in response.text
