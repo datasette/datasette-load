@@ -7,6 +7,18 @@ import os
 import tempfile
 
 
+def create_datasette(db_path=None):
+    files = []
+    if db_path:
+        files = [db_path]
+    datasette = Datasette(
+        files=files,
+        memory=True,
+        config={"permissions": {"datasette-load": {"id": "user"}}},
+    )
+    return datasette
+
+
 def create_temp_sqlite_db(tables_data):
     temp_dir = tempfile.mkdtemp()
     db_path = os.path.join(temp_dir, "data.db")
@@ -25,8 +37,23 @@ def non_mocked_hosts():
 
 
 @pytest.mark.asyncio
-async def test_load_api_success(httpx_mock, tmp_path):
-    datasette = Datasette(memory=True)
+@pytest.mark.parametrize("user_id", (None, "bob"))
+async def test_permission_denied_to_load(user_id):
+    datasette = create_datasette()
+    cookies = {}
+    if user_id:
+        cookies["ds_actor"] = datasette.client.actor_cookie({"id": user_id})
+    response = await datasette.client.post(
+        "/-/load",
+        json={"url": "https://example.com/data.db", "name": "new_db"},
+        cookies=cookies,
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_load_api_success(httpx_mock):
+    datasette = create_datasette()
 
     # 1. Set up a mock SQLite database and its URL
     tables_data = {
@@ -51,6 +78,7 @@ async def test_load_api_success(httpx_mock, tmp_path):
     response = await datasette.client.post(
         "/-/load",
         json={"url": db_url, "name": "new_db"},
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
     assert response.status_code == 200
     job_id = response.json()["id"]
@@ -85,10 +113,11 @@ async def test_load_api_success(httpx_mock, tmp_path):
 
 @pytest.mark.asyncio
 async def test_load_api_invalid_json(httpx_mock):
-    datasette = Datasette(memory=True)
+    datasette = create_datasette()
     response = await datasette.client.post(
         "/-/load",
         content="invalid json",  # Send invalid JSON
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
     assert response.status_code == 400
     assert "Invalid JSON" in response.json()["error"]
@@ -96,10 +125,11 @@ async def test_load_api_invalid_json(httpx_mock):
 
 @pytest.mark.asyncio
 async def test_load_api_missing_params(httpx_mock):
-    datasette = Datasette(memory=True)
+    datasette = create_datasette()
     response = await datasette.client.post(
         "/-/load",
         json={"url": "http://example.com/db.sqlite"},  # Missing 'name'
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
     assert response.status_code == 400
     assert "Missing required parameters" in response.json()["error"]
@@ -107,14 +137,15 @@ async def test_load_api_missing_params(httpx_mock):
     response2 = await datasette.client.post(
         "/-/load",
         json={"name": "test_db"},  # Missing 'url'
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
     assert response2.status_code == 400
     assert "Missing required parameters" in response.json()["error"]
 
 
 @pytest.mark.asyncio
-async def test_load_api_download_error(httpx_mock, tmp_path):
-    datasette = Datasette(memory=True)
+async def test_load_api_download_error(httpx_mock):
+    datasette = create_datasette()
 
     # Simulate a network error during download
     httpx_mock.add_exception(
@@ -124,6 +155,7 @@ async def test_load_api_download_error(httpx_mock, tmp_path):
     response = await datasette.client.post(
         "/-/load",
         json={"url": "http://example.com/error.db", "name": "error_db"},
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
     assert response.status_code == 200
     status_url = response.json()["status_url"].split("localhost")[1]
@@ -143,7 +175,7 @@ async def test_load_api_download_error(httpx_mock, tmp_path):
 
 @pytest.mark.asyncio
 async def test_load_api_integrity_check_failure(httpx_mock, tmp_path):
-    datasette = Datasette(memory=True)
+    datasette = create_datasette()
     # Create a corrupted database (e.g., by truncating a valid database file)
     good_db_path = create_temp_sqlite_db({"test": [{"id": 1}]})
     corrupted_db_path = os.path.join(tmp_path, "corrupted.db")
@@ -170,6 +202,7 @@ async def test_load_api_integrity_check_failure(httpx_mock, tmp_path):
     response = await datasette.client.post(
         "/-/load",
         json={"url": corrupted_db_url, "name": "corrupted_db"},
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
     job_id = response.json()["id"]
     status_url = f"/-/load/status/{job_id}"
@@ -189,7 +222,7 @@ async def test_load_api_integrity_check_failure(httpx_mock, tmp_path):
 
 @pytest.mark.asyncio
 async def test_load_status_api_not_found():
-    datasette = Datasette(memory=True)
+    datasette = create_datasette()
     response = await datasette.client.get("/-/load/status/invalid-job-id")
     assert response.status_code == 404
     assert response.json()["error"] == "Job not found"
@@ -205,13 +238,16 @@ async def test_database_removed_if_exists(httpx_mock):
         content=open(db_path, "rb").read(),
         headers={"Content-Length": str(os.path.getsize(db_path))},
     )
-    datasette = Datasette([db_path])  # start with a database with that name
+    datasette = create_datasette(db_path)
+
     assert "data" in datasette.databases
     await datasette.invoke_startup()
 
     # Now, load a new database WITH THE SAME NAME
     response = await datasette.client.post(
-        "/-/load", json={"url": db_uri, "name": "data"}
+        "/-/load",
+        json={"url": db_uri, "name": "data"},
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
 
     assert response.status_code == 200
@@ -238,7 +274,10 @@ async def test_database_removed_if_exists(httpx_mock):
 
 @pytest.mark.asyncio
 async def test_load_endpoint_html():
-    datasette = Datasette(memory=True)
-    response = await datasette.client.get("/-/load")
+    datasette = create_datasette()
+    response = await datasette.client.get(
+        "/-/load",
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
+    )
     assert response.status_code == 200
     assert ">Load data from a URL<" in response.text

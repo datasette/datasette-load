@@ -17,6 +17,17 @@ datasette install datasette-load
 
 Users and API tokens with the `datasette-load` permission can visit `/-/load` where they can provide a URL to a SQLite database file and the name it should use within Datasette to trigger a download of that SQLite database.
 
+You can assign that permission to the `root` user by starting Datasette like this:
+
+```bash
+datasette -s permissions.datasette-load.id root --root
+```
+Or with the following configuration in the `datasette -c datasette.yaml` file:
+```yaml
+permissions:
+  datasette-load:
+    id: root
+```
 API tokens with that permission can use this API:
 
 ```

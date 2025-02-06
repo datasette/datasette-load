@@ -1,6 +1,6 @@
 import asyncio
 from datasette.database import Database
-from datasette import hookimpl, Response
+from datasette import hookimpl, Response, Permission, Forbidden
 import json
 import uuid
 import os
@@ -22,12 +22,31 @@ def skip_csrf(scope):
     return scope["path"] == "/-/load"
 
 
+@hookimpl
+def register_permissions():
+    return [
+        Permission(
+            name="datasette-load",
+            abbr=None,
+            description="Load data into Datasette from a URL",
+            takes_database=False,
+            takes_resource=False,
+            default=False,
+        ),
+    ]
+
+
 async def load_view(request, datasette):
     """
     Handle POST /-/load
     Expected JSON body:
         {"url": "<database URL>", "name": "<database name>"}
     """
+    if not await datasette.permission_allowed(request.actor, "datasette-load"):
+        return Response.json(
+            {"forbidden": "datasette-load permission is required"}, status=403
+        )
+
     if request.method != "POST":
         return Response.html(
             await datasette.render_template("load_view.html", request=request)
@@ -70,7 +89,7 @@ async def load_view(request, datasette):
     datasette._datasette_load_progress[job_id] = job
 
     # Launch processing in background
-    asyncio.create_task(process_load(job, datasette))
+    asyncio.create_task(load_database_task(job, datasette))
     await asyncio.sleep(0.2)
 
     return Response.json(job)
@@ -127,7 +146,7 @@ async def download_sqlite_db(
     await complete_callback(url, name, directory_path, error)
 
 
-async def process_load(job, datasette):
+async def load_database_task(job, datasette):
     """
     Process the load job by downloading the SQLite database and installing it into Datasette.
     Updates job status and progress throughout the process.
