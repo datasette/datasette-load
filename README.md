@@ -31,8 +31,8 @@ That API endpoint returns:
   "name": "tils",
   "done": false,
   "error": null,
-  "todo": 20250624,
-  "done": 0,
+  "todo_bytes": 20250624,
+  "done_bytes": 0,
   "status_url": "https://blah.datasette/-/load/status/1D2A2328-199E-4D4D-AF3B-967131ADB795"
 }
 ```

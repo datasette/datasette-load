@@ -12,7 +12,7 @@ import httpx
 @hookimpl
 def register_routes():
     return [
-        (r"/-/load$", load_api),
+        (r"/-/load$", load_view),
         (r"/-/load/status/(?P<job_id>[^/]+)$", load_status_api),
     ]
 
@@ -22,14 +22,16 @@ def skip_csrf(scope):
     return scope["path"] == "/-/load"
 
 
-async def load_api(request, datasette):
+async def load_view(request, datasette):
     """
     Handle POST /-/load
     Expected JSON body:
         {"url": "<database URL>", "name": "<database name>"}
     """
     if request.method != "POST":
-        return Response.text("Method not allowed", status=405)
+        return Response.html(
+            await datasette.render_template("load_view.html", request=request)
+        )
 
     try:
         data = json.loads(await request.post_body())
@@ -58,8 +60,8 @@ async def load_api(request, datasette):
         "name": name,
         "done": False,
         "error": None,
-        "todo": 0,
-        "done_count": 0,
+        "todo_bytes": 0,
+        "done_bytes": 0,
         "status_url": status_url,
     }
     datasette._datasette_load_progress = (
@@ -69,6 +71,7 @@ async def load_api(request, datasette):
 
     # Launch processing in background
     asyncio.create_task(process_load(job, datasette))
+    await asyncio.sleep(0.2)
 
     return Response.json(job)
 
@@ -135,8 +138,8 @@ async def process_load(job, datasette):
 
         async def progress_callback(bytes_so_far, total_bytes):
             """Update job progress"""
-            job["todo"] = total_bytes
-            job["done_count"] = bytes_so_far
+            job["todo_bytes"] = total_bytes
+            job["done_bytes"] = bytes_so_far
 
         async def complete_callback(url, name, directory_path, error):
             """Handle completion of download"""

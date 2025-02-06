@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+
+{% block title %}Load data from a URL into Datasette{% endblock %}
+
+{% block extra_head %}
+<style>
+#progress-bar-container {
+  width: 100%;
+  background-color: #ddd;
+  border-radius: 4px;
+  margin-top: 10px;
+  display: none; /* Hidden by default */
+}
+
+#progress-bar {
+  height: 30px;
+  background-color: #4caf50;
+  width: 0%;
+  border-radius: 4px;
+  text-align: center;
+  color: white;
+  padding: 3px 5px;
+}
+
+#progress-info {
+  margin-top: 0.5em;
+}
+
+input[type="submit"][disabled] {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+#progress-bar.unknown {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    #bbffbe,
+    #4caf50 10px,
+    #66bb6a 10px,
+    #66bb6a 20px
+  );
+  background-size: 200% 200%;
+  animation: barberpole 5s linear infinite;
+}
+@keyframes barberpole {
+  from {
+    background-position: 100% 100%;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+#error-message {
+  color: red;
+  border: 1px solid red;
+  padding: 10px;
+  margin-top: 10px;
+  display: none; /* Hidden by default */
+  border-radius: 4px;
+}
+
+#result {
+  margin-top: 10px;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Datasette Load</h1>
+
+<form class="core" id="load-form">
+  <p>
+    <label for="url">URL:</label>
+    <input type="text" id="url" name="url" required>
+  </p>
+
+  <p>
+    <label for="name">Name:</label>
+    <input type="text" id="name" name="name" required>
+  </p>
+
+  <input type="submit" value="Load data">
+</form>
+
+<div id="progress-bar-container">
+  <div id="progress-bar">0%</div>
+</div>
+<div id="progress-info"></div>
+
+<div id="error-message"></div>
+
+<div id="result"></div>
+
+<script>
+  const loadForm = document.getElementById("load-form");
+  const submitButton = loadForm.querySelector('input[type="submit"]');
+  const urlInput = document.getElementById("url");
+  const nameInput = document.getElementById("name");
+  const progressBarContainer = document.getElementById(
+    "progress-bar-container"
+  );
+  const progressBar = document.getElementById("progress-bar");
+  const progressInfo = document.getElementById("progress-info");
+  const errorMessage = document.getElementById("error-message");
+  const resultDiv = document.getElementById("result");
+
+  let pollingInterval = null;
+  let isLoading = false; // Flag to track loading state
+
+  loadForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (isLoading) {
+      return; // Exit if already loading
+    }
+
+    isLoading = true;
+    submitButton.disabled = true; // Disable the button
+    console.log(submitButton, submitButton.disabled);
+    urlInput.disabled = true;   // Disable input fields
+    nameInput.disabled = true;
+
+    clearInterval(pollingInterval); // Clear the polling interval
+    const url = urlInput.value;
+    const name = nameInput.value;
+
+    // Clear previous results/errors
+    progressBar.style.width = "0%";
+    progressBar.textContent = "0%";
+    progressBar.classList.remove("unknown");
+    progressBarContainer.style.display = "none";
+    progressInfo.textContent = "";
+    errorMessage.style.display = "none";
+    errorMessage.textContent = "";
+    resultDiv.innerHTML = "";
+
+    try {
+      const response = await fetch("/-/load", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url, name }),
+        credentials: "include", // Include cookies
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! Status: ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      if (data.status_url) {
+        progressBarContainer.style.display = "block";
+        pollStatus(data.status_url);
+      }
+    } catch (error) {
+      console.error("Error:", error);
+      errorMessage.textContent = `Error: ${error.message}`;
+      errorMessage.style.display = "block";
+      clearInterval(pollingInterval);
+      isLoading = false;
+      submitButton.disabled = false;
+      urlInput.disabled = false;
+      nameInput.disabled = false;
+    }
+  });
+
+  async function pollStatus(statusUrl) {
+
+    pollingInterval = setInterval(async () => {
+      try {
+        const response = await fetch(statusUrl, { credentials: "include" });
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+        const data = await response.json();
+
+        if (data.error) {
+          throw new Error(data.error);
+        }
+
+        if (data.done) {
+          clearInterval(pollingInterval);
+          progressBar.style.width = "100%";
+          progressBar.textContent = "100%";
+          isLoading = false;
+          submitButton.disabled = false;
+          urlInput.disabled = false;
+          nameInput.disabled = false;
+          resultDiv.innerHTML = `
+                        <p>Database loaded successfully!</p>
+                        <p>View it at: <a href="/${data.name}">${data.name}</a></p>
+                    `;
+        } else {
+          if (data.todo_bytes === 0) {
+            progressBar.classList.add("unknown");
+            progressBar.textContent = "";
+            progressInfo.textContent = `Loaded ${data.done_bytes} bytes`;
+          } else {
+            const progress = (data.done_bytes / data.todo_bytes) * 100;
+            progressBar.style.width = `${progress}%`;
+            progressBar.textContent = `${progress.toFixed(2)}%`;
+            progressInfo.textContent = `Loaded ${data.done_bytes.toLocaleString()} / ${data.todo_bytes.toLocaleString()} bytes`;
+            progressBar.classList.remove("unknown");
+          }
+        }
+      } catch (error) {
+        console.error("Error:", error);
+        errorMessage.textContent = `Error: ${error.message}`;
+        errorMessage.style.display = "block";
+        clearInterval(pollingInterval);
+        progressBarContainer.style.display = "none";
+        isLoading = false;
+        submitButton.disabled = false;
+        urlInput.disabled = false;
+        nameInput.disabled = false;
+      }
+    }, 300);
+  }
+</script>
+{% endblock %}
