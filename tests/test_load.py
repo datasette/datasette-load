@@ -1,11 +1,244 @@
 from datasette.app import Datasette
 import pytest
+import sqlite_utils
+import httpx
+import asyncio
+import os
+import tempfile
+
+
+def create_temp_sqlite_db(tables_data):
+    temp_dir = tempfile.mkdtemp()
+    db_path = os.path.join(temp_dir, "data.db")
+    db = sqlite_utils.Database(db_path)
+
+    for table_name, rows in tables_data.items():
+        db[table_name].insert_all(rows, pk="id")
+
+    return db_path
+
+
+@pytest.fixture
+def non_mocked_hosts():
+    # This ensures httpx doesn't mock external calls
+    return ["localhost"]
 
 
 @pytest.mark.asyncio
-async def test_plugin_is_installed():
+async def test_load_api_success(httpx_mock, tmp_path):
     datasette = Datasette(memory=True)
-    response = await datasette.client.get("/-/plugins.json")
+
+    # 1. Set up a mock SQLite database and its URL
+    tables_data = {
+        "test_table": [
+            {"id": 1, "name": "Test Row 1"},
+            {"id": 2, "name": "Test Row 2"},
+        ]
+    }
+    db_path = create_temp_sqlite_db(tables_data)
+    db_url = "https://example.com/data.db"
+
+    # Mock the HTTP request to return the content of the database
+    with open(db_path, "rb") as f:
+        db_content = f.read()
+    httpx_mock.add_response(
+        url=db_url,
+        content=db_content,  # Directly serve the database file content
+        headers={"Content-Length": str(len(db_content))},
+    )
+
+    # 2. Call POST /-/load
+    response = await datasette.client.post(
+        "/-/load",
+        json={"url": db_url, "name": "new_db"},
+    )
     assert response.status_code == 200
-    installed_plugins = {p["name"] for p in response.json()}
-    assert "datasette-load" in installed_plugins
+    job_id = response.json()["id"]
+    assert job_id is not None
+    status_url = response.json()["status_url"]
+    assert status_url == f"http://localhost/-/load/status/{job_id}"
+    status_path = status_url.split("localhost")[1]
+
+    # 3. Poll /-/load/status/{job_id} until done
+    while True:
+        status_response = await datasette.client.get(status_path)
+        assert status_response.status_code == 200
+        status_data = status_response.json()
+        if status_data["done"]:
+            break
+        await asyncio.sleep(0.1)  # short sleep to avoid busy-loop
+
+    # 4. Verify the final status
+    assert status_data["done"] is True
+    assert status_data["error"] is None
+    assert status_data["name"] == "new_db"
+    assert "done_count" in status_data
+    assert "todo" in status_data
+    # Check that the database was correctly added, and that the tables and data are accurate
+    db = datasette.get_database("new_db")
+    assert "new_db" in datasette.databases
+    result = await db.execute("SELECT * FROM test_table")
+    assert len(result.rows) == 2
+    assert tuple(result.rows[0]) == (1, "Test Row 1")
+    assert tuple(result.rows[1]) == (2, "Test Row 2")
+
+
+@pytest.mark.asyncio
+async def test_load_api_invalid_json(httpx_mock):
+    datasette = Datasette(memory=True)
+    response = await datasette.client.post(
+        "/-/load",
+        content="invalid json",  # Send invalid JSON
+    )
+    assert response.status_code == 400
+    assert "Invalid JSON" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_load_api_missing_params(httpx_mock):
+    datasette = Datasette(memory=True)
+    response = await datasette.client.post(
+        "/-/load",
+        json={"url": "http://example.com/db.sqlite"},  # Missing 'name'
+    )
+    assert response.status_code == 400
+    assert "Missing required parameters" in response.json()["error"]
+
+    response2 = await datasette.client.post(
+        "/-/load",
+        json={"name": "test_db"},  # Missing 'url'
+    )
+    assert response2.status_code == 400
+    assert "Missing required parameters" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_load_api_download_error(httpx_mock, tmp_path):
+    datasette = Datasette(memory=True)
+
+    # Simulate a network error during download
+    httpx_mock.add_exception(
+        httpx.NetworkError("Simulated network error"), url="http://example.com/error.db"
+    )
+
+    response = await datasette.client.post(
+        "/-/load",
+        json={"url": "http://example.com/error.db", "name": "error_db"},
+    )
+    assert response.status_code == 200
+    status_url = response.json()["status_url"].split("localhost")[1]
+
+    # Poll for completion
+    while True:
+        status_response = await datasette.client.get(status_url)
+        status_data = status_response.json()
+        if status_data["done"]:
+            break
+        await asyncio.sleep(0.1)
+
+    assert status_data["done"] is True
+    assert "Simulated network error" in status_data["error"]
+    assert "error_db" not in datasette.databases
+
+
+@pytest.mark.asyncio
+async def test_load_api_integrity_check_failure(httpx_mock, tmp_path):
+    datasette = Datasette(memory=True)
+    # Create a corrupted database (e.g., by truncating a valid database file)
+    good_db_path = create_temp_sqlite_db({"test": [{"id": 1}]})
+    corrupted_db_path = os.path.join(tmp_path, "corrupted.db")
+
+    with (
+        open(good_db_path, "rb") as good_db,
+        open(corrupted_db_path, "wb") as corrupted_db,
+    ):
+        corrupted_db.write(good_db.read(100))  # Truncate the file
+
+    corrupted_db_url = "https://example.com/corrupted.db"
+
+    # 2. Set up httpx_mock to return the content of the corrupted database
+    with open(corrupted_db_path, "rb") as f:
+        corrupted_db_content = f.read()
+
+    httpx_mock.add_response(
+        url=corrupted_db_url,
+        content=corrupted_db_content,
+        headers={"Content-Length": str(len(corrupted_db_content))},
+    )
+
+    # 3. Attempt to load the corrupted database
+    response = await datasette.client.post(
+        "/-/load",
+        json={"url": corrupted_db_url, "name": "corrupted_db"},
+    )
+    job_id = response.json()["id"]
+    status_url = f"/-/load/status/{job_id}"
+
+    # 4. Poll /-/load/status/{job_id} until done
+    while True:
+        status_response = await datasette.client.get(status_url)
+        status_data = status_response.json()
+        if status_data["done"]:
+            break
+        await asyncio.sleep(0.1)
+    # Verify that database loading failed and no database was created.
+    assert status_data["done"]
+    assert "database disk image is malformed" in status_data["error"]
+    assert "corrupted_db" not in datasette.databases
+
+
+@pytest.mark.asyncio
+async def test_load_status_api_not_found():
+    datasette = Datasette(memory=True)
+    response = await datasette.client.get("/-/load/status/invalid-job-id")
+    assert response.status_code == 404
+    assert response.json()["error"] == "Job not found"
+
+
+@pytest.mark.asyncio
+async def test_database_removed_if_exists(httpx_mock):
+    db_path = create_temp_sqlite_db({"test_table": [{"id": 1, "data": "exists"}]})
+    db_uri = "https://example.com/data.db"
+
+    httpx_mock.add_response(
+        url=db_uri,
+        content=open(db_path, "rb").read(),
+        headers={"Content-Length": str(os.path.getsize(db_path))},
+    )
+    datasette = Datasette([db_path])  # start with a database with that name
+    assert "data" in datasette.databases
+    await datasette.invoke_startup()
+
+    # Now, load a new database WITH THE SAME NAME
+    response = await datasette.client.post(
+        "/-/load", json={"url": db_uri, "name": "data"}
+    )
+
+    assert response.status_code == 200
+    job_id = response.json()["id"]
+    assert datasette._datasette_load_progress[job_id]
+
+    status_url = response.json()["status_url"].split("localhost")[1]
+
+    while True:
+        response = await datasette.client.get(status_url)
+        assert response.status_code == 200
+        data = response.json()
+        if data["done"]:
+            break
+        await asyncio.sleep(0.1)
+
+    assert data["done"]
+    assert not data["error"]
+    assert "data" in datasette.databases
+    db = datasette.databases["data"]
+    result = await db.execute("select * from test_table")
+    assert len(result.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_method_not_allowed_for_load_endpoint():
+    datasette = Datasette(memory=True)
+    response = await datasette.client.get("/-/load")
+    assert response.status_code == 405
+    assert response.text == "Method not allowed"

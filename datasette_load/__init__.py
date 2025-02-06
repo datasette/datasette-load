@@ -8,8 +8,6 @@ import pathlib
 import sqlite3
 import httpx
 
-JOBS = {}
-
 
 @hookimpl
 def register_routes():
@@ -64,7 +62,10 @@ async def load_api(request, datasette):
         "done_count": 0,
         "status_url": status_url,
     }
-    JOBS[job_id] = job
+    datasette._datasette_load_progress = (
+        getattr(datasette, "_datasette_load_progress", None) or {}
+    )
+    datasette._datasette_load_progress[job_id] = job
 
     # Launch processing in background
     asyncio.create_task(process_load(job, datasette))
@@ -183,7 +184,10 @@ async def load_status_api(request, datasette):
     Returns the JSON status record for the given job.
     """
     job_id = request.url_vars["job_id"]
-    job = JOBS.get(job_id)
+    datasette._datasette_load_progress = (
+        getattr(datasette, "_datasette_load_progress", None) or {}
+    )
+    job = datasette._datasette_load_progress.get(job_id)
     if job is None:
         return Response.json({"error": "Job not found"}, status=404)
     return Response.json(job)
