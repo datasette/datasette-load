@@ -1,12 +1,27 @@
+#!/usr/bin/env python3
 import asyncio
-from datasette.database import Database
-from datasette import hookimpl, Response, Permission, Forbidden
+import dataclasses
 import json
-import uuid
 import os
 import pathlib
 import sqlite3
+import tempfile
+import uuid
 import httpx
+import shutil
+
+from datasette import hookimpl, Response, Permission
+from datasette.database import Database
+
+
+# Configuration dataclass
+@dataclasses.dataclass
+class Config:
+    staging_directory: pathlib.Path
+    database_directory: pathlib.Path
+
+
+import asyncio
 
 
 @hookimpl
@@ -32,7 +47,7 @@ def register_permissions():
             takes_database=False,
             takes_resource=False,
             default=False,
-        ),
+        )
     ]
 
 
@@ -51,9 +66,27 @@ def homepage_actions(datasette, actor):
     return inner
 
 
+def config(datasette):
+    """
+    Return configuration settings.
+    Expects plugin config to supply:
+      - staging_directory: where to temporarily download files
+      - database_directory: where final databases are stored
+    """
+    plugin_config = datasette.plugin_config("datasette-load") or {}
+    return Config(
+        staging_directory=pathlib.Path(
+            plugin_config.get("staging_directory") or tempfile.gettempdir()
+        ),
+        database_directory=pathlib.Path(
+            plugin_config.get("database_directory") or "."
+        ).absolute(),
+    )
+
+
 async def load_view(request, datasette):
     """
-    Handle POST /-/load
+    Handles POST /-/load.
     Expected JSON body:
         {"url": "<database URL>", "name": "<database name>"}
     """
@@ -79,15 +112,11 @@ async def load_view(request, datasette):
             {"error": "Missing required parameters: url or name"}, status=400
         )
 
-    # Generate a unique job ID
+    # Create unique job id and a status record.
     job_id = str(uuid.uuid4())
-
-    # Build a status URL
     status_url = datasette.absolute_url(
         request, datasette.urls.path(f"/-/load/status/{job_id}")
     )
-
-    # Create job record
     job = {
         "id": job_id,
         "url": url,
@@ -98,28 +127,40 @@ async def load_view(request, datasette):
         "done_bytes": 0,
         "status_url": status_url,
     }
-    datasette._datasette_load_progress = (
-        getattr(datasette, "_datasette_load_progress", None) or {}
+    datasette._datasette_load_progress = getattr(
+        datasette, "_datasette_load_progress", {}
     )
     datasette._datasette_load_progress[job_id] = job
 
-    # Launch processing in background
+    # Launch the background processing task.
     asyncio.create_task(load_database_task(job, datasette))
     await asyncio.sleep(0.2)
-
     return Response.json(job)
 
 
 async def download_sqlite_db(
-    url: str, name: str, directory_path: str, progress_callback, complete_callback
+    url: str,
+    name: str,
+    staging_dir: pathlib.Path,
+    database_dir: pathlib.Path,
+    progress_callback,
+    complete_callback,
 ):
     """
-    Downloads an SQLite DB from the specified URL to a file named {name}.db in the given directory.
-    Calls progress_callback(bytes_so_far, total_bytes) periodically during the download,
-    and when done performs a SQLite PRAGMA integrity_check before calling complete_callback().
-    If any error occurs (during download or integrity check), it is passed to complete_callback().
+    Downloads an SQLite DB from the given URL into a temporary file in the staging directory.
+    The progress_callback is called as data arrives.
+    After download, the temporary file is verified with PRAGMA integrity_check.
+        • If the check fails, the temp file is deleted.
+        • If the check succeeds, the file is moved to database_dir/{name}.db.
+    The complete_callback is invoked with any error (or None if successful).
     """
-    file_path = os.path.join(directory_path, f"{name}.db")
+    # Ensure the staging directory and final directory exist.
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    database_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a temporary file in the staging directory.
+    temp_filename = f"{name}-{uuid.uuid4().hex}.temp.db"
+    temp_file_path = staging_dir / temp_filename
     error = None
 
     try:
@@ -132,17 +173,17 @@ async def download_sqlite_db(
                     if content_length and content_length.isdigit()
                     else 0
                 )
-
                 bytes_so_far = 0
-                with open(file_path, "wb") as f:
+
+                with open(temp_file_path, "wb") as f:
                     async for chunk in response.aiter_bytes(8192):
                         f.write(chunk)
                         bytes_so_far += len(chunk)
                         await progress_callback(bytes_so_far, total_bytes)
 
-        # Perform integrity check
+        # Run PRAGMA integrity_check on the downloaded file.
         try:
-            conn = sqlite3.connect(file_path)
+            conn = sqlite3.connect(str(temp_file_path))
             cursor = conn.cursor()
             cursor.execute("PRAGMA integrity_check;")
             result = cursor.fetchone()
@@ -154,62 +195,69 @@ async def download_sqlite_db(
                 )
         except Exception as integrity_error:
             error = integrity_error
+            if temp_file_path.exists():
+                os.remove(temp_file_path)
+
+        # If integrity check succeeded, move file to final database directory.
+        if not error:
+            final_db_path = database_dir / f"{name}.db"
+            if final_db_path.exists():
+                os.remove(final_db_path)
+            os.replace(str(temp_file_path), str(final_db_path))
 
     except Exception as download_error:
         error = download_error
+        if temp_file_path.exists():
+            os.remove(temp_file_path)
 
-    await complete_callback(url, name, directory_path, error)
+    await complete_callback(name, database_dir, error)
 
 
 async def load_database_task(job, datasette):
     """
-    Process the load job by downloading the SQLite database and installing it into Datasette.
-    Updates job status and progress throughout the process.
+    Downloads and installs the SQLite DB as described in the job.
+    Uses config(datasette) for staging and final database directories.
+    Updates the job progress and, upon completion, if correct installs
+    the new database into Datasette (removing any existing copy with the same name).
     """
     try:
-        # TODO: Get from plugin settings
-        db_dir = str(pathlib.Path(".").absolute())
+        cfg = config(datasette)
+        staging_dir = cfg.staging_directory
+        database_dir = cfg.database_directory
 
         async def progress_callback(bytes_so_far, total_bytes):
-            """Update job progress"""
             job["todo_bytes"] = total_bytes
             job["done_bytes"] = bytes_so_far
 
-        async def complete_callback(url, name, directory_path, error):
-            """Handle completion of download"""
+        async def complete_callback(name, database_directory, error):
             if error:
                 job["error"] = str(error)
                 job["done"] = True
                 return
 
             try:
-                # Get the path to the downloaded database
-                db_path = os.path.join(directory_path, f"{name}.db")
-
-                # Remove existing database if it exists
+                final_db_path = database_directory / f"{name}.db"
+                # If a database with this name is already loaded, remove it.
                 if name in datasette.databases:
                     datasette.remove_database(name)
-
-                # Add the new database to Datasette
+                # Add the new verified database to Datasette.
                 datasette.add_database(
-                    Database(
-                        datasette,
-                        path=db_path,
-                    ),
+                    Database(datasette, path=str(final_db_path)),
                     name=name,
                 )
-
                 job["done"] = True
-
             except Exception as e:
                 job["error"] = f"Error installing database: {str(e)}"
                 job["done"] = True
 
-        # Start the download
         await download_sqlite_db(
-            job["url"], job["name"], db_dir, progress_callback, complete_callback
+            url=job["url"],
+            name=job["name"],
+            staging_dir=staging_dir,
+            database_dir=database_dir,
+            progress_callback=progress_callback,
+            complete_callback=complete_callback,
         )
-
     except Exception as e:
         job["error"] = f"Error initiating download: {str(e)}"
         job["done"] = True
@@ -217,12 +265,11 @@ async def load_database_task(job, datasette):
 
 async def load_status_api(request, datasette):
     """
-    Handle GET /-/load/status/<job_id>
-    Returns the JSON status record for the given job.
+    Handles GET /-/load/status/<job_id> and returns a JSON record for the job.
     """
     job_id = request.url_vars["job_id"]
-    datasette._datasette_load_progress = (
-        getattr(datasette, "_datasette_load_progress", None) or {}
+    datasette._datasette_load_progress = getattr(
+        datasette, "_datasette_load_progress", {}
     )
     job = datasette._datasette_load_progress.get(job_id)
     if job is None:

@@ -1,9 +1,10 @@
+import asyncio
 from datasette.app import Datasette
 import pytest
 import sqlite_utils
 import httpx
-import asyncio
 import os
+import pathlib
 import tempfile
 
 
@@ -11,10 +12,19 @@ def create_datasette(db_path=None):
     files = []
     if db_path:
         files = [db_path]
+    temp_dir = tempfile.mkdtemp()
     datasette = Datasette(
         files=files,
         memory=True,
-        config={"permissions": {"datasette-load": {"id": "user"}}},
+        config={
+            "permissions": {"datasette-load": {"id": "user"}},
+            "plugins": {
+                "datasette-load": {
+                    "staging_directory": os.path.join(temp_dir, "staging"),
+                    "database_directory": os.path.join(temp_dir, "database"),
+                }
+            },
+        },
     )
     return datasette
 
@@ -218,6 +228,11 @@ async def test_load_api_integrity_check_failure(httpx_mock, tmp_path):
     assert status_data["done"]
     assert "database disk image is malformed" in status_data["error"]
     assert "corrupted_db" not in datasette.databases
+
+    # It shouldn't be in the folder either
+    path = datasette.plugin_config("datasette-load")["database_directory"]
+    files = list(pathlib.Path(path).glob("*.db"))
+    assert not files
 
 
 @pytest.mark.asyncio

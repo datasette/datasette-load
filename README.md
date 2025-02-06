@@ -13,6 +13,24 @@ Install this plugin in the same environment as Datasette.
 ```bash
 datasette install datasette-load
 ```
+
+## Configuration
+
+This plugin does not require configuration - by default it downloads files to the system temp directory and swaps them into the current working directory once they have been verified as valid SQLite.
+
+The plugin provides two optional settings to control which directories are used here:
+
+```yaml
+plugins:
+  datasette-load:
+    staging_directory: /tmp
+    database_directory: /home/location
+```
+
+`staging_directory` is used for the initial download. Files will be deleted from here if the download fails.
+
+If the download succeeds (and the database integrity check passes) the file will be moved into the `database_directory` folder. This defaults to the directory in which the Datasette application was started if you do not otherwise configure it.
+
 ## Usage
 
 Users and API tokens with the `datasette-load` permission can visit `/-/load` where they can provide a URL to a SQLite database file and the name it should use within Datasette to trigger a download of that SQLite database.
