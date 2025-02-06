@@ -11,7 +11,7 @@ classifiers=[
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "datasette>=1.0a16"
+    "datasette>=1.0a17"
 ]
 
 [build-system]

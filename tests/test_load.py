@@ -288,6 +288,51 @@ async def test_database_removed_if_exists(httpx_mock):
 
 
 @pytest.mark.asyncio
+async def test_replace_database(httpx_mock):
+    db_path1 = create_temp_sqlite_db({"test_table": [{"id": 1, "data": "exists"}]})
+    db_path2 = create_temp_sqlite_db({"test_table": [{"id": 2, "data": "exists"}]})
+    db_uri1 = "https://example.com/data.db"
+    db_uri2 = "https://example.com/data2.db"
+
+    httpx_mock.add_response(
+        url=db_uri1,
+        content=open(db_path1, "rb").read(),
+        headers={"Content-Length": str(os.path.getsize(db_path1))},
+    )
+    httpx_mock.add_response(
+        url=db_uri2,
+        content=open(db_path2, "rb").read(),
+        headers={"Content-Length": str(os.path.getsize(db_path2))},
+    )
+    datasette = create_datasette()
+    await datasette.invoke_startup()
+
+    # Load first database
+    assert (
+        await datasette.client.post(
+            "/-/load",
+            json={"url": db_uri1, "name": "data"},
+            cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
+        )
+    ).status_code == 200
+    await asyncio.sleep(0.1)
+    data1 = (await datasette.client.get("/data/test_table.json?_shape=array")).json()
+    assert data1 == [{"data": "exists", "id": 1}]
+
+    # Load the second one to replace it
+    assert (
+        await datasette.client.post(
+            "/-/load",
+            json={"url": db_uri2, "name": "data"},
+            cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
+        )
+    ).status_code == 200
+    await asyncio.sleep(0.1)
+    data1 = (await datasette.client.get("/data/test_table.json?_shape=array")).json()
+    assert data1 == [{"data": "exists", "id": 2}]
+
+
+@pytest.mark.asyncio
 async def test_load_endpoint_html():
     datasette = create_datasette()
     response = await datasette.client.get(
