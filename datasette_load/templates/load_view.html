@@ -188,6 +188,7 @@ input[type="submit"][disabled] {
           clearInterval(pollingInterval);
           progressBar.style.width = "100%";
           progressBar.textContent = "100%";
+          progressBar.classList.remove("unknown");
           isLoading = false;
           submitButton.disabled = false;
           urlInput.disabled = false;
@@ -199,8 +200,9 @@ input[type="submit"][disabled] {
         } else {
           if (data.todo_bytes === 0) {
             progressBar.classList.add("unknown");
+            progressBar.style.width = "100%";
             progressBar.textContent = "";
-            progressInfo.textContent = `Loaded ${data.done_bytes} bytes`;
+            progressInfo.textContent = `Loaded ${data.done_bytes.toLocaleString()} bytes`;
           } else {
             const progress = (data.done_bytes / data.todo_bytes) * 100;
             progressBar.style.width = `${progress}%`;
