@@ -13,9 +13,11 @@ Install this plugin in the same environment as Datasette.
 ```bash
 datasette install datasette-load
 ```
-## API
+## Usage
 
-Users and API tokens with the `datasette-load` permission will be able to use the following API:
+Users and API tokens with the `datasette-load` permission can visit `/-/load` where they can provide a URL to a SQLite database file and the name it should use within Datasette to trigger a download of that SQLite database.
+
+API tokens with that permission can use this API:
 
 ```
 POST /-/load
