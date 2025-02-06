@@ -8,7 +8,6 @@ import sqlite3
 import tempfile
 import uuid
 import httpx
-import shutil
 
 from datasette import hookimpl, Response, Permission
 from datasette.database import Database
@@ -19,9 +18,6 @@ from datasette.database import Database
 class Config:
     staging_directory: pathlib.Path
     database_directory: pathlib.Path
-
-
-import asyncio
 
 
 @hookimpl
