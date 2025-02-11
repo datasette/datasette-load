@@ -4,6 +4,7 @@ import dataclasses
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 import tempfile
 import uuid
@@ -199,7 +200,7 @@ async def download_sqlite_db(
             final_db_path = database_dir / f"{name}.db"
             if final_db_path.exists():
                 os.remove(final_db_path)
-            os.replace(str(temp_file_path), str(final_db_path))
+            shutil.move(str(temp_file_path), str(final_db_path))
 
     except Exception as download_error:
         error = download_error
