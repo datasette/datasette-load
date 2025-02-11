@@ -19,6 +19,7 @@ from datasette.database import Database
 class Config:
     staging_directory: pathlib.Path
     database_directory: pathlib.Path
+    enable_wal: bool
 
 
 @hookimpl
@@ -78,6 +79,7 @@ def config(datasette):
         database_directory=pathlib.Path(
             plugin_config.get("database_directory") or "."
         ).absolute(),
+        enable_wal=bool(plugin_config.get("enable_wal")),
     )
 
 
@@ -140,6 +142,7 @@ async def download_sqlite_db(
     name: str,
     staging_dir: pathlib.Path,
     database_dir: pathlib.Path,
+    enable_wal: bool,
     progress_callback,
     complete_callback,
 ):
@@ -201,6 +204,10 @@ async def download_sqlite_db(
             if final_db_path.exists():
                 os.remove(final_db_path)
             shutil.move(str(temp_file_path), str(final_db_path))
+            if enable_wal:
+                conn = sqlite3.connect(str(final_db_path))
+                conn.execute("PRAGMA journal_mode=wal;")
+                conn.close()
 
     except Exception as download_error:
         error = download_error
@@ -219,8 +226,6 @@ async def load_database_task(job, datasette):
     """
     try:
         cfg = config(datasette)
-        staging_dir = cfg.staging_directory
-        database_dir = cfg.database_directory
 
         async def progress_callback(bytes_so_far, total_bytes):
             job["todo_bytes"] = total_bytes
@@ -250,8 +255,9 @@ async def load_database_task(job, datasette):
         await download_sqlite_db(
             url=job["url"],
             name=job["name"],
-            staging_dir=staging_dir,
-            database_dir=database_dir,
+            staging_dir=cfg.staging_directory,
+            database_dir=cfg.database_directory,
+            enable_wal=cfg.enable_wal,
             progress_callback=progress_callback,
             complete_callback=complete_callback,
         )

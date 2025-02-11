@@ -31,6 +31,15 @@ plugins:
 
 If the download succeeds (and the database integrity check passes) the file will be moved into the `database_directory` folder. This defaults to the directory in which the Datasette application was started if you do not otherwise configure it.
 
+To enable WAL mode on the database once it has been saved to the `database_directory` include the `enable_wal: true` option:
+
+```yaml
+plugins:
+  datasette-load:
+    database_directory: /home/location
+    enable_wal: true
+```
+
 ## Usage
 
 Users and API tokens with the `datasette-load` permission can visit `/-/load` where they can provide a URL to a SQLite database file and the name it should use within Datasette to trigger a download of that SQLite database.

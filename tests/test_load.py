@@ -8,22 +8,23 @@ import pathlib
 import tempfile
 
 
-def create_datasette(db_path=None):
+def create_datasette(db_path=None, enable_wal=None):
     files = []
     if db_path:
         files = [db_path]
     temp_dir = tempfile.mkdtemp()
+    options = {
+        "staging_directory": os.path.join(temp_dir, "staging"),
+        "database_directory": os.path.join(temp_dir, "database"),
+    }
+    if enable_wal is not None:
+        options["enable_wal"] = enable_wal
     datasette = Datasette(
         files=files,
         memory=True,
         config={
             "permissions": {"datasette-load": {"id": "user"}},
-            "plugins": {
-                "datasette-load": {
-                    "staging_directory": os.path.join(temp_dir, "staging"),
-                    "database_directory": os.path.join(temp_dir, "database"),
-                }
-            },
+            "plugins": {"datasette-load": options},
         },
     )
     return datasette
@@ -356,3 +357,38 @@ async def test_homepage_menu(user_id):
         assert fragment in response.text
     else:
         assert fragment not in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enable_wal", (None, False, True))
+async def test_enable_wal(httpx_mock, enable_wal):
+    db_path = create_temp_sqlite_db({"test_table": [{"id": 1, "data": "exists"}]})
+    db_url = "https://example.com/data.db"
+    httpx_mock.add_response(
+        url=db_url,
+        content=open(db_path, "rb").read(),
+        headers={"Content-Length": str(os.path.getsize(db_path))},
+    )
+    datasette = create_datasette(enable_wal=enable_wal)
+    await datasette.invoke_startup()
+
+    # Load first database
+    assert (
+        await datasette.client.post(
+            "/-/load",
+            json={"url": db_url, "name": "data"},
+            cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
+        )
+    ).status_code == 200
+
+    # check if enable-wal is on or off
+    final_db_path = next(
+        pathlib.Path(
+            datasette.plugin_config("datasette-load")["database_directory"]
+        ).glob("*")
+    )
+    db = sqlite_utils.Database(final_db_path)
+    if not enable_wal:
+        assert db.journal_mode == "delete"
+    else:
+        assert db.journal_mode == "wal"
