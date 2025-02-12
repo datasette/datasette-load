@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import tempfile
 import uuid
+import zipfile
 import httpx
 
 from datasette import hookimpl, Response, Permission
@@ -181,7 +182,36 @@ async def download_sqlite_db(
                         bytes_so_far += len(chunk)
                         await progress_callback(bytes_so_far, total_bytes)
 
-        # Run PRAGMA integrity_check on the downloaded file.
+        # Check if file is a zip file
+        if zipfile.is_zipfile(temp_file_path):
+            try:
+                with zipfile.ZipFile(temp_file_path) as zf:
+                    zip_size = os.path.getsize(temp_file_path)
+                    # Find largest file in the zip
+                    largest_file = max(zf.infolist(), key=lambda x: x.file_size)
+                    if largest_file.file_size > zip_size * 5:
+                        raise Exception(
+                            "Extracted file would be more than 5x the size of the zip file"
+                        )
+
+                    # Extract largest file to a new temporary path
+                    extracted_path = (
+                        staging_dir / f"{name}-{uuid.uuid4().hex}.extracted.db"
+                    )
+                    with zf.open(largest_file.filename) as source, open(
+                        extracted_path, "wb"
+                    ) as target:
+                        shutil.copyfileobj(source, target)
+
+                # Remove the zip file and use extracted file for further processing
+                os.remove(temp_file_path)
+                temp_file_path = extracted_path
+            except Exception as e:
+                if temp_file_path.exists():
+                    os.remove(temp_file_path)
+                raise e
+
+        # Run PRAGMA integrity_check on the file
         try:
             conn = sqlite3.connect(str(temp_file_path))
             cursor = conn.cursor()
