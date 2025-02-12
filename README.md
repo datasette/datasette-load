@@ -61,7 +61,7 @@ API tokens with that permission can use this API:
 POST /-/load
 {"url": "https://s3.amazonaws.com/til.simonwillison.net/tils.db", "name": "tils"}
 ```
-This tells Datasette to download the SQLite database from the given URL and use it to create (or replace) the `/tils` database in the Datasette instance. The URL can point to either a SQLite database file or a zip file containing a SQLite database - if a zip file is provided, the largest file in the archive will be extracted and used (after verifying it is a valid SQLite database). For security, the plugin will reject zip files where the largest file would extract to more than 5x the size of the zip file itself.
+This tells Datasette to download the SQLite database from the given URL and use it to create (or replace) the `/tils` database in the Datasette instance.
 
 That API endpoint returns:
 ```json
@@ -79,6 +79,10 @@ That API endpoint returns:
 The `status_url` can be polled for completion. It will return the same JSON format.
 
 When the download has finished the API will return `"done": true` and either `"error": null` if it worked or `"error": "error description"` if something went wrong.
+
+## Zip support
+
+The URL can point to either a SQLite database file or a zip file containing a SQLite database - if a zip file is provided, the largest file in the archive will be extracted and used (after verifying it is a valid SQLite database). For security, the plugin will reject zip files where the largest file would extract to more than 5x the size of the zip file itself.
 
 ## Development
 
