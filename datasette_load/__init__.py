@@ -6,6 +6,7 @@ import os
 import pathlib
 import shutil
 import sqlite3
+import tarfile
 import tempfile
 import uuid
 import zipfile
@@ -182,28 +183,80 @@ async def download_sqlite_db(
                         bytes_so_far += len(chunk)
                         await progress_callback(bytes_so_far, total_bytes)
 
-        # Check if file is a zip file
-        if zipfile.is_zipfile(temp_file_path):
+        # Check if file is a zip or tar.gz file
+        is_zip = zipfile.is_zipfile(temp_file_path)
+        is_gzip = tarfile.is_tarfile(temp_file_path)
+        if is_zip or is_gzip:
             try:
-                with zipfile.ZipFile(temp_file_path) as zf:
-                    zip_size = os.path.getsize(temp_file_path)
-                    # Find largest file in the zip
-                    largest_file = max(zf.infolist(), key=lambda x: x.file_size)
-                    if largest_file.file_size > zip_size * 5:
-                        raise Exception(
-                            "Extracted file would be more than 5x the size of the zip file"
+                archive_size = os.path.getsize(temp_file_path)
+                extracted_path = staging_dir / f"{name}-{uuid.uuid4().hex}.extracted.db"
+
+                if is_zip:
+                    with zipfile.ZipFile(temp_file_path) as zf:
+                        # Find largest file in the zip
+                        largest_file = max(zf.infolist(), key=lambda x: x.file_size)
+                        # Log sizes for debugging
+                        print(
+                            f"ZIP - Archive size: {archive_size}, Largest file size: {largest_file.file_size}"
                         )
-
-                    # Extract largest file to a new temporary path
-                    extracted_path = (
-                        staging_dir / f"{name}-{uuid.uuid4().hex}.extracted.db"
+                        # Check size limit based on file size:
+                        # - For archives under 1MB, allow up to 20x expansion
+                        # - For larger archives, limit to 5x to prevent zip bombs
+                        max_ratio = 20 if archive_size < 1024 * 1024 else 5
+                        if largest_file.file_size > archive_size * max_ratio:
+                            raise Exception(
+                                f"Extracted file would be more than {max_ratio}x the size of the zip file ({largest_file.file_size} vs {archive_size} bytes)"
+                            )
+                        # Extract largest file
+                        with zf.open(largest_file.filename) as source, open(
+                            extracted_path, "wb"
+                        ) as target:
+                            shutil.copyfileobj(source, target)
+                else:
+                    # First extract to a temp location and check size afterwards
+                    temp_extract = (
+                        staging_dir / f"{name}-{uuid.uuid4().hex}.temp_extract"
                     )
-                    with zf.open(largest_file.filename) as source, open(
-                        extracted_path, "wb"
-                    ) as target:
-                        shutil.copyfileobj(source, target)
+                    os.makedirs(temp_extract, exist_ok=True)
 
-                # Remove the zip file and use extracted file for further processing
+                    with tarfile.open(temp_file_path, "r:*") as tf:
+                        # Extract all files to temp location
+                        tf.extractall(temp_extract)
+
+                        # Find largest file
+                        largest_size = 0
+                        largest_path = None
+                        for root, _, files in os.walk(temp_extract):
+                            for file in files:
+                                file_path = os.path.join(root, file)
+                                size = os.path.getsize(file_path)
+                                if size > largest_size:
+                                    largest_size = size
+                                    largest_path = file_path
+
+                        if not largest_path:
+                            shutil.rmtree(temp_extract)
+                            raise Exception("No valid files found in archive")
+
+                        # Log sizes for debugging
+                        print(
+                            f"TAR - Archive size: {archive_size}, Largest file size: {largest_size}"
+                        )
+                        # Check size limit based on file size:
+                        # - For archives under 1MB, allow up to 20x expansion
+                        # - For larger archives, limit to 5x to prevent tar bombs
+                        max_ratio = 20 if archive_size < 1024 * 1024 else 5
+                        if largest_size > archive_size * max_ratio:
+                            shutil.rmtree(temp_extract)
+                            raise Exception(
+                                f"Extracted file would be more than {max_ratio}x the size of the tar.gz file ({largest_size} vs {archive_size} bytes)"
+                            )
+
+                        # Move largest file to final location
+                        shutil.move(largest_path, extracted_path)
+                        shutil.rmtree(temp_extract)
+
+                # Remove the archive file and use extracted file for further processing
                 os.remove(temp_file_path)
                 temp_file_path = extracted_path
             except Exception as e:
@@ -292,7 +345,7 @@ async def load_database_task(job, datasette):
             complete_callback=complete_callback,
         )
     except Exception as e:
-        job["error"] = f"Error initiating download: {str(e)}"
+        job["error"] = str(e)
         job["done"] = True
 
 
