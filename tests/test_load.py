@@ -6,6 +6,7 @@ import httpx
 import os
 import pathlib
 import tempfile
+import zipfile
 
 
 def create_datasette(db_path=None, enable_wal=None):
@@ -392,3 +393,99 @@ async def test_enable_wal(httpx_mock, enable_wal):
         assert db.journal_mode == "delete"
     else:
         assert db.journal_mode == "wal"
+
+
+@pytest.mark.asyncio
+async def test_load_from_zip(httpx_mock, tmp_path):
+    datasette = create_datasette()
+
+    # Create a test database
+    db_path = create_temp_sqlite_db({"test_table": [{"id": 1, "name": "Test Row"}]})
+
+    # Create a zip file containing the database
+    zip_path = os.path.join(tmp_path, "database.zip")
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.write(db_path, "test.db")
+
+    # Mock the HTTP request
+    zip_url = "https://example.com/database.zip"
+    with open(zip_path, "rb") as f:
+        zip_content = f.read()
+    httpx_mock.add_response(
+        url=zip_url,
+        content=zip_content,
+        headers={"Content-Length": str(len(zip_content))},
+    )
+
+    # Load the zipped database
+    response = await datasette.client.post(
+        "/-/load",
+        json={"url": zip_url, "name": "from_zip"},
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
+    )
+    assert response.status_code == 200
+    job_id = response.json()["id"]
+    status_url = f"/-/load/status/{job_id}"
+
+    # Poll until complete
+    while True:
+        status_response = await datasette.client.get(status_url)
+        status_data = status_response.json()
+        if status_data["done"]:
+            break
+        await asyncio.sleep(0.1)
+
+    assert status_data["error"] is None
+    assert "from_zip" in datasette.databases
+
+    # Verify the database contents
+    db = datasette.get_database("from_zip")
+    result = await db.execute("SELECT * FROM test_table")
+    assert len(result.rows) == 1
+    assert tuple(result.rows[0]) == (1, "Test Row")
+
+
+@pytest.mark.asyncio
+async def test_load_from_zip_compression_bomb(httpx_mock, tmp_path):
+    datasette = create_datasette()
+
+    # Create a test database with lots of repeated data to get high compression
+    db_path = create_temp_sqlite_db(
+        {"test_table": [{"id": i, "name": "x" * 1000} for i in range(1000)]}
+    )
+
+    # Create a zip file containing the database
+    zip_path = os.path.join(tmp_path, "database.zip")
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.write(db_path, "test.db")
+
+    # Mock the HTTP request
+    zip_url = "https://example.com/database.zip"
+    with open(zip_path, "rb") as f:
+        zip_content = f.read()
+    httpx_mock.add_response(
+        url=zip_url,
+        content=zip_content,
+        headers={"Content-Length": str(len(zip_content))},
+    )
+
+    # Load the zipped database
+    response = await datasette.client.post(
+        "/-/load",
+        json={"url": zip_url, "name": "from_zip"},
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
+    )
+    assert response.status_code == 200
+    job_id = response.json()["id"]
+    status_url = f"/-/load/status/{job_id}"
+
+    # Poll until complete
+    while True:
+        status_response = await datasette.client.get(status_url)
+        status_data = status_response.json()
+        if status_data["done"]:
+            break
+        await asyncio.sleep(0.1)
+
+    assert "would be more than 5x the size" in status_data["error"]
+    assert "from_zip" not in datasette.databases
