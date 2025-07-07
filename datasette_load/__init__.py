@@ -107,6 +107,7 @@ async def load_view(request, datasette):
 
     url = data.get("url")
     name = data.get("name")
+    headers = data.get("headers")
     if not url or not name:
         return Response.json(
             {"error": "Missing required parameters: url or name"}, status=400
@@ -133,7 +134,7 @@ async def load_view(request, datasette):
     datasette._datasette_load_progress[job_id] = job
 
     # Launch the background processing task.
-    asyncio.create_task(load_database_task(job, datasette))
+    asyncio.create_task(load_database_task(job, datasette, headers=headers))
     await asyncio.sleep(0.2)
     return Response.json(job)
 
@@ -146,6 +147,7 @@ async def download_sqlite_db(
     enable_wal: bool,
     progress_callback,
     complete_callback,
+    headers=None,
 ):
     """
     Downloads an SQLite DB from the given URL into a temporary file in the staging directory.
@@ -154,6 +156,7 @@ async def download_sqlite_db(
         • If the check fails, the temp file is deleted.
         • If the check succeeds, the file is moved to database_dir/{name}.db.
     The complete_callback is invoked with any error (or None if successful).
+    Optional headers can be supplied for the HTTP request.
     """
     # Ensure the staging directory and final directory exist.
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -166,7 +169,7 @@ async def download_sqlite_db(
 
     try:
         async with httpx.AsyncClient() as client:
-            async with client.stream("GET", url) as response:
+            async with client.stream("GET", url, headers=headers) as response:
                 response.raise_for_status()
                 content_length = response.headers.get("Content-Length")
                 total_bytes = (
@@ -247,7 +250,7 @@ async def download_sqlite_db(
     await complete_callback(name, database_dir, error)
 
 
-async def load_database_task(job, datasette):
+async def load_database_task(job, datasette, headers=None):
     """
     Downloads and installs the SQLite DB as described in the job.
     Uses config(datasette) for staging and final database directories.
@@ -290,6 +293,7 @@ async def load_database_task(job, datasette):
             enable_wal=cfg.enable_wal,
             progress_callback=progress_callback,
             complete_callback=complete_callback,
+            headers=headers,
         )
     except Exception as e:
         job["error"] = f"Error initiating download: {str(e)}"

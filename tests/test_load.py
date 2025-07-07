@@ -124,6 +124,44 @@ async def test_load_api_success(httpx_mock):
 
 
 @pytest.mark.asyncio
+async def test_load_api_with_headers(httpx_mock):
+    datasette = create_datasette()
+
+    db_path = create_temp_sqlite_db({"t": [{"id": 1}]})
+    db_url = "https://example.com/headers.db"
+
+    with open(db_path, "rb") as f:
+        db_content = f.read()
+    httpx_mock.add_response(
+        url=db_url,
+        content=db_content,
+        headers={"Content-Length": str(len(db_content))},
+    )
+
+    response = await datasette.client.post(
+        "/-/load",
+        json={
+            "url": db_url,
+            "name": "headers_db",
+            "headers": {"Authorization": "Bearer TEST"},
+        },
+        cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
+    )
+    assert response.status_code == 200
+    status_path = response.json()["status_url"].split("localhost")[1]
+    while True:
+        status_response = await datasette.client.get(status_path)
+        status_data = status_response.json()
+        if status_data["done"]:
+            break
+        await asyncio.sleep(0.1)
+
+    assert status_data["error"] is None
+    req = httpx_mock.get_requests()[0]
+    assert req.headers.get("Authorization") == "Bearer TEST"
+
+
+@pytest.mark.asyncio
 async def test_load_api_invalid_json(httpx_mock):
     datasette = create_datasette()
     response = await datasette.client.post(
