@@ -61,6 +61,15 @@ API tokens with that permission can use this API:
 POST /-/load
 {"url": "https://s3.amazonaws.com/til.simonwillison.net/tils.db", "name": "tils"}
 ```
+You can optionally include additional HTTP headers to be used when fetching the URL:
+```
+POST /-/load
+{
+  "url": "https://example.com/db.sqlite",
+  "name": "db",
+  "headers": {"Authorization": "Bearer XXX"}
+}
+```
 This tells Datasette to download the SQLite database from the given URL and use it to create (or replace) the `/tils` database in the Datasette instance.
 
 That API endpoint returns:
