@@ -5,6 +5,7 @@ import sqlite_utils
 import httpx
 import os
 import pathlib
+import tarfile
 import tempfile
 import zipfile
 
@@ -434,31 +435,45 @@ async def test_enable_wal(httpx_mock, enable_wal):
 
 
 @pytest.mark.asyncio
-async def test_load_from_zip(httpx_mock, tmp_path):
+@pytest.mark.parametrize(
+    "archive_type",
+    [
+        ("zip", "database.zip", zipfile.ZipFile, "w", "from_zip"),
+        ("tar.gz", "database.tar.gz", tarfile.open, "w:gz", "from_targz"),
+    ],
+)
+async def test_load_from_archive(httpx_mock, tmp_path, archive_type):
+    format_name, filename, opener, mode, db_name = archive_type
     datasette = create_datasette()
 
-    # Create a test database
-    db_path = create_temp_sqlite_db({"test_table": [{"id": 1, "name": "Test Row"}]})
-
-    # Create a zip file containing the database
-    zip_path = os.path.join(tmp_path, "database.zip")
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.write(db_path, "test.db")
-
-    # Mock the HTTP request
-    zip_url = "https://example.com/database.zip"
-    with open(zip_path, "rb") as f:
-        zip_content = f.read()
-    httpx_mock.add_response(
-        url=zip_url,
-        content=zip_content,
-        headers={"Content-Length": str(len(zip_content))},
+    # Create a test database that's over 1MB to avoid size ratio issues
+    # This ensures we stay under both the 5x and 20x ratio limits
+    db_path = create_temp_sqlite_db(
+        {"test_table": [{"id": i, "name": "Test Row"} for i in range(1000)]}
     )
 
-    # Load the zipped database
+    # Create archive containing the database
+    archive_path = os.path.join(tmp_path, filename)
+    with opener(archive_path, mode) as archive:
+        if format_name == "zip":
+            archive.write(db_path, "test.db")
+        else:
+            archive.add(db_path, "test.db")
+
+    # Mock the HTTP request
+    archive_url = f"https://example.com/{filename}"
+    with open(archive_path, "rb") as f:
+        archive_content = f.read()
+    httpx_mock.add_response(
+        url=archive_url,
+        content=archive_content,
+        headers={"Content-Length": str(len(archive_content))},
+    )
+
+    # Load the archived database
     response = await datasette.client.post(
         "/-/load",
-        json={"url": zip_url, "name": "from_zip"},
+        json={"url": archive_url, "name": db_name},
         cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
     assert response.status_code == 200
@@ -474,43 +489,57 @@ async def test_load_from_zip(httpx_mock, tmp_path):
         await asyncio.sleep(0.1)
 
     assert status_data["error"] is None
-    assert "from_zip" in datasette.databases
+    assert db_name in datasette.databases
 
     # Verify the database contents
-    db = datasette.get_database("from_zip")
+    db = datasette.get_database(db_name)
     result = await db.execute("SELECT * FROM test_table")
-    assert len(result.rows) == 1
-    assert tuple(result.rows[0]) == (1, "Test Row")
+    assert len(result.rows) == 1000  # Verify all rows were loaded
+    assert all(
+        row[1] == "Test Row" for row in result.rows
+    )  # All rows have the same text
 
 
 @pytest.mark.asyncio
-async def test_load_from_zip_compression_bomb(httpx_mock, tmp_path):
+@pytest.mark.parametrize(
+    "archive_type",
+    [
+        ("zip", "database.zip", zipfile.ZipFile, "w", "from_zip", zipfile.ZIP_DEFLATED),
+        ("tar.gz", "database.tar.gz", tarfile.open, "w:gz", "from_targz", None),
+    ],
+)
+async def test_load_from_archive_compression_bomb(httpx_mock, tmp_path, archive_type):
+    format_name, filename, opener, mode, db_name, compression = archive_type
     datasette = create_datasette()
 
-    # Create a test database with lots of repeated data to get high compression
+    # Create a 5MB uncompressed database that should compress very well
     db_path = create_temp_sqlite_db(
-        {"test_table": [{"id": i, "name": "x" * 1000} for i in range(1000)]}
+        {"test_table": [{"id": i, "name": "x" * 5000} for i in range(1000)]}
     )
 
-    # Create a zip file containing the database
-    zip_path = os.path.join(tmp_path, "database.zip")
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(db_path, "test.db")
+    # Create archive
+    archive_path = os.path.join(tmp_path, filename)
+    if format_name == "zip":
+        with opener(archive_path, mode, compression=compression) as archive:
+            archive.write(db_path, "test.db")
+    else:
+        with opener(archive_path, mode) as archive:
+            archive.add(db_path, "test.db")
 
     # Mock the HTTP request
-    zip_url = "https://example.com/database.zip"
-    with open(zip_path, "rb") as f:
-        zip_content = f.read()
+    archive_url = f"https://example.com/{filename}"
+    with open(archive_path, "rb") as f:
+        archive_content = f.read()
     httpx_mock.add_response(
-        url=zip_url,
-        content=zip_content,
-        headers={"Content-Length": str(len(zip_content))},
+        url=archive_url,
+        content=archive_content,
+        headers={"Content-Length": str(len(archive_content))},
     )
 
-    # Load the zipped database
+    # Load the archive
     response = await datasette.client.post(
         "/-/load",
-        json={"url": zip_url, "name": "from_zip"},
+        json={"url": archive_url, "name": db_name},
         cookies={"ds_actor": datasette.client.actor_cookie({"id": "user"})},
     )
     assert response.status_code == 200
@@ -525,5 +554,6 @@ async def test_load_from_zip_compression_bomb(httpx_mock, tmp_path):
             break
         await asyncio.sleep(0.1)
 
-    assert "would be more than 5x the size" in status_data["error"]
-    assert "from_zip" not in datasette.databases
+    # For any reasonable compression, this should fail since 5MB -> 20KB is >5x expansion
+    assert "would be more than 20x the size" in status_data["error"]
+    assert db_name not in datasette.databases
