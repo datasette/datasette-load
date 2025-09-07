@@ -89,9 +89,11 @@ The `status_url` can be polled for completion. It will return the same JSON form
 
 When the download has finished the API will return `"done": true` and either `"error": null` if it worked or `"error": "error description"` if something went wrong.
 
-## Zip support
+## Archive support
 
-The URL can point to either a SQLite database file or a zip file containing a SQLite database - if a zip file is provided, the largest file in the archive will be extracted and used (after verifying it is a valid SQLite database). For security, the plugin will reject zip files where the largest file would extract to more than 5x the size of the zip file itself.
+The URL can point to either a SQLite database file, or a zip/tar.gz archive containing a SQLite database - if an archive is provided, the largest file in the archive will be extracted and used (after verifying it is a valid SQLite database). For security, the plugin uses size limits to prevent decompression bomb attacks:
+- For archives under 1MB, the extracted file must be under 20x the archive size
+- For larger archives, the extracted file must be under 5x the archive size
 
 ## Development
 
