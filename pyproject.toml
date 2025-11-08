@@ -1,6 +1,6 @@
 [project]
 name = "datasette-load"
-version = "0.1a4"
+version = "0.1a5"
 description = "API and UI for bulk loading data into Datasette from a URL"
 readme = "README.md"
 authors = [{name = "Datasette"}]
