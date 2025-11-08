@@ -11,7 +11,8 @@ import uuid
 import zipfile
 import httpx
 
-from datasette import hookimpl, Response, Permission
+from datasette import hookimpl, Response
+from datasette.permissions import Action
 from datasette.database import Database
 
 
@@ -37,15 +38,11 @@ def skip_csrf(scope):
 
 
 @hookimpl
-def register_permissions():
+def register_actions():
     return [
-        Permission(
+        Action(
             name="datasette-load",
-            abbr=None,
             description="Load data into Datasette from a URL",
-            takes_database=False,
-            takes_resource=False,
-            default=False,
         )
     ]
 
@@ -53,7 +50,7 @@ def register_permissions():
 @hookimpl
 def homepage_actions(datasette, actor):
     async def inner():
-        if actor and await datasette.permission_allowed(actor, "datasette-load"):
+        if await datasette.allowed(actor=actor, action="datasette-load"):
             return [
                 {
                     "href": datasette.urls.path("/-/load"),
@@ -90,7 +87,7 @@ async def load_view(request, datasette):
     Expected JSON body:
         {"url": "<database URL>", "name": "<database name>"}
     """
-    if not await datasette.permission_allowed(request.actor, "datasette-load"):
+    if not await datasette.allowed(actor=request.actor, action="datasette-load"):
         return Response.json(
             {"forbidden": "datasette-load permission is required"}, status=403
         )
@@ -201,9 +198,10 @@ async def download_sqlite_db(
                     extracted_path = (
                         staging_dir / f"{name}-{uuid.uuid4().hex}.extracted.db"
                     )
-                    with zf.open(largest_file.filename) as source, open(
-                        extracted_path, "wb"
-                    ) as target:
+                    with (
+                        zf.open(largest_file.filename) as source,
+                        open(extracted_path, "wb") as target,
+                    ):
                         shutil.copyfileobj(source, target)
 
                 # Remove the zip file and use extracted file for further processing
